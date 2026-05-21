@@ -1,0 +1,9 @@
+# Local SwiftBar settings
+swiftbar/.usage-counter.conf
+
+# macOS metadata
+.DS_Store
+
+# Node/npm local state
+node_modules/
+npm-debug.log*
