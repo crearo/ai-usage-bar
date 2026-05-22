@@ -1,7 +1,7 @@
 #!/bin/zsh
 
 # <xbar.title>Agent Usage</xbar.title>
-# <xbar.version>v1.1.0</xbar.version>
+# <xbar.version>v1.2.0</xbar.version>
 # <xbar.author>local</xbar.author>
 # <xbar.desc>Shows today's Claude/Codex usage in the macOS menu bar.</xbar.desc>
 # <xbar.dependencies>ccusage,node</xbar.dependencies>
@@ -9,13 +9,16 @@
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
-script_path="${0:A}"
+script_path="${USAGE_COUNTER_WRAPPER_PATH:-${0:A}}"
 plugin_dir="${0:A:h}"
 config_file="$plugin_dir/.usage-counter.conf"
 stderr_dir="${TMPDIR:-/tmp}/swiftbar-agent-usage"
+cache_output_file="$stderr_dir/menu.out"
+cache_meta_file="$stderr_dir/menu.meta"
 
 mode="codex"
 reset_hour="0"
+refresh_seconds="60"
 
 read_config() {
   [[ -f "$config_file" ]] || return
@@ -24,6 +27,7 @@ read_config() {
     case "$key" in
       MODE) mode="$value" ;;
       RESET_HOUR) reset_hour="$value" ;;
+      REFRESH_SECONDS) refresh_seconds="$value" ;;
     esac
   done < "$config_file"
 
@@ -35,13 +39,23 @@ read_config() {
   if [[ "$reset_hour" != <-> ]] || (( reset_hour < 0 || reset_hour > 23 )); then
     reset_hour="0"
   fi
+
+  case "$refresh_seconds" in
+    15|30|60|300) ;;
+    *) refresh_seconds="60" ;;
+  esac
 }
 
 write_config() {
   {
     echo "MODE=$mode"
     echo "RESET_HOUR=$reset_hour"
+    echo "REFRESH_SECONDS=$refresh_seconds"
   } > "$config_file"
+}
+
+clear_cache() {
+  rm -f "$cache_output_file" "$cache_meta_file"
 }
 
 read_config
@@ -52,6 +66,7 @@ case "$1" in
       claude|codex|both)
         mode="$2"
         write_config
+        clear_cache
         ;;
     esac
     exit 0
@@ -60,7 +75,22 @@ case "$1" in
     if [[ "$2" == <-> ]] && (( $2 >= 0 && $2 <= 23 )); then
       reset_hour="$2"
       write_config
+      clear_cache
     fi
+    exit 0
+    ;;
+  set-refresh-seconds)
+    case "$2" in
+      15|30|60|300)
+        refresh_seconds="$2"
+        write_config
+        clear_cache
+        ;;
+    esac
+    exit 0
+    ;;
+  force-refresh)
+    clear_cache
     exit 0
     ;;
 esac
@@ -105,6 +135,27 @@ if (( reset_hour > 0 )); then
   timezone_args=(--timezone "$timezone_name")
 fi
 
+cache_key="$mode|$reset_hour|$refresh_seconds|$display_date|$query_date|$timezone_name"
+cache_key_saved=""
+cache_last_run="0"
+now="$(date +%s)"
+
+if [[ -f "$cache_meta_file" ]]; then
+  while IFS='=' read -r key value; do
+    case "$key" in
+      CACHE_KEY) cache_key_saved="$value" ;;
+      LAST_RUN) cache_last_run="$value" ;;
+    esac
+  done < "$cache_meta_file"
+fi
+
+if [[ -s "$cache_output_file" && "$cache_key_saved" == "$cache_key" && "$cache_last_run" == <-> ]]; then
+  if (( now - cache_last_run < refresh_seconds )); then
+    cat "$cache_output_file"
+    exit 0
+  fi
+fi
+
 run_report() {
   local source="$1"
   local stderr_file="$stderr_dir/$source.err"
@@ -146,8 +197,9 @@ case "$mode" in
     ;;
 esac
 
-MODE="$mode" \
+menu_output="$(MODE="$mode" \
 RESET_HOUR="$reset_hour" \
+REFRESH_SECONDS="$refresh_seconds" \
 DISPLAY_DATE="$display_date" \
 QUERY_DATE="$query_date" \
 TIMEZONE_NAME="$timezone_name" \
@@ -157,6 +209,7 @@ CODEX_USAGE_JSON="$codex_json" \
 /usr/bin/env node <<'NODE'
 const mode = process.env.MODE || "codex";
 const resetHour = Number.parseInt(process.env.RESET_HOUR || "0", 10);
+const refreshSeconds = Number.parseInt(process.env.REFRESH_SECONDS || "60", 10);
 const displayDate = process.env.DISPLAY_DATE || "";
 const queryDate = process.env.QUERY_DATE || "";
 const timezoneName = process.env.TIMEZONE_NAME || "system timezone";
@@ -284,6 +337,10 @@ function selected(current, value) {
   return current === value ? "[x]" : "[ ]";
 }
 
+function refreshLabel(seconds) {
+  return `${seconds}s`;
+}
+
 function action(command, value) {
   return `bash=${scriptPath} param1=${command} param2=${value} terminal=false refresh=true`;
 }
@@ -304,6 +361,7 @@ try {
   console.log(`${modeLabel()} ${money(total.cost)} ${compactNumber(total.total)}`);
   console.log("---");
   console.log(`Mode: ${modeLabel()}`);
+  console.log(`Refresh: ${refreshLabel(refreshSeconds)}`);
   console.log(`Usage day: ${displayDate}`);
   console.log(`Reset time: ${resetLabel}`);
   if (resetHour > 0) console.log(`Grouping timezone: ${timezoneName}`);
@@ -330,6 +388,12 @@ try {
   console.log(`${selected(mode, "both")} Claude + Codex | ${action("set-mode", "both")}`);
 
   console.log("---");
+  console.log("Refresh interval");
+  for (const seconds of [15, 30, 60, 300]) {
+    console.log(`${selected(refreshSeconds, seconds)} ${refreshLabel(seconds)} | ${action("set-refresh-seconds", seconds)}`);
+  }
+
+  console.log("---");
   console.log("Reset time");
   for (const hour of [0, 4, 8, 12]) {
     const label = `${String(hour).padStart(2, "0")}:00`;
@@ -337,7 +401,7 @@ try {
   }
 
   console.log("---");
-  console.log("Refresh | refresh=true");
+  console.log(`Refresh now | ${action("force-refresh", "1")}`);
   console.log(`Config: ${queryDate}`);
 } catch (error) {
   console.log("Usage ? | color=#d14343 sfimage=exclamationmark.triangle");
@@ -345,3 +409,15 @@ try {
   console.log(`Could not parse ccusage JSON: ${error.message}`);
 }
 NODE
+)"
+node_exit=$?
+
+printf "%s\n" "$menu_output"
+
+if (( node_exit == 0 )); then
+  printf "%s\n" "$menu_output" > "$cache_output_file"
+  {
+    echo "CACHE_KEY=$cache_key"
+    echo "LAST_RUN=$now"
+  } > "$cache_meta_file"
+fi

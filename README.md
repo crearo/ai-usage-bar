@@ -14,6 +14,6 @@ When SwiftBar asks for a plugin folder, choose:
 /path/to/repo/swiftbar
 ```
 
-Click the menu bar item to switch between `Codex only`, `Claude only`, `Claude + Codex`, or to change the reset time.
+Click the menu bar item to change the source, refresh interval, or reset time. Default refresh is `60s`.
 
-To start after reboot: System Settings -> General -> Login Items & Extensions -> Open at Login -> add SwiftBar.
+To start after reboot: System Settings -> General -> Login Items & Extensions -> Open at Login -> add SwiftBar. If the item is missing after reboot, open SwiftBar and select the plugin folder again.
