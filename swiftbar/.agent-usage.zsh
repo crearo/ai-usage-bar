@@ -16,7 +16,7 @@ stderr_dir="${TMPDIR:-/tmp}/swiftbar-agent-usage"
 cache_output_file="$stderr_dir/menu.out"
 cache_meta_file="$stderr_dir/menu.meta"
 
-mode="codex"
+mode="both"
 reset_hour="0"
 refresh_seconds="60"
 
@@ -33,7 +33,7 @@ read_config() {
 
   case "$mode" in
     claude|codex|both) ;;
-    *) mode="codex" ;;
+    *) mode="both" ;;
   esac
 
   if [[ "$reset_hour" != <-> ]] || (( reset_hour < 0 || reset_hour > 23 )); then
@@ -207,7 +207,7 @@ SCRIPT_PATH="$script_path" \
 CLAUDE_USAGE_JSON="$claude_json" \
 CODEX_USAGE_JSON="$codex_json" \
 /usr/bin/env node <<'NODE'
-const mode = process.env.MODE || "codex";
+const mode = process.env.MODE || "both";
 const resetHour = Number.parseInt(process.env.RESET_HOUR || "0", 10);
 const refreshSeconds = Number.parseInt(process.env.REFRESH_SECONDS || "60", 10);
 const displayDate = process.env.DISPLAY_DATE || "";
@@ -237,7 +237,8 @@ function fullNumber(value) {
 }
 
 function money(value) {
-  return `$${Math.round(value).toLocaleString("en-US")}`;
+  const rounded = Math.round(value);
+  return `$${Object.is(rounded, -0) ? 0 : rounded.toLocaleString("en-US")}`;
 }
 
 function parseJson(raw, label) {
