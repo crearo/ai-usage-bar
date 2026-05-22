@@ -157,6 +157,10 @@ if [[ -s "$cache_output_file" && "$cache_key_saved" == "$cache_key" && "$cache_l
   fi
 fi
 
+empty_report() {
+  printf '{"daily":[],"totals":{"cacheCreationTokens":0,"cacheReadTokens":0,"cachedInputTokens":0,"costUSD":0,"inputTokens":0,"outputTokens":0,"reasoningOutputTokens":0,"totalCost":0,"totalTokens":0}}'
+}
+
 run_report() {
   local source="$1"
   local stderr_file="$stderr_dir/$source.err"
@@ -166,6 +170,10 @@ run_report() {
   local exit_code=$?
 
   if (( exit_code != 0 )); then
+    if { [[ -s "$stderr_file" ]] && grep -q "No valid .* data directories found" "$stderr_file"; } || printf "%s" "$output" | grep -q "No valid .* data directories found"; then
+      empty_report
+      return
+    fi
     echo "Usage ? | color=#d14343 sfimage=exclamationmark.triangle"
     echo "---"
     echo "Command failed:"

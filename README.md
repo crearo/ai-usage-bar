@@ -10,6 +10,12 @@ npm install -g ccusage
 open -a SwiftBar
 ```
 
+Update ccusage later with:
+
+```sh
+npm install -g ccusage@latest
+```
+
 When SwiftBar asks for a plugin folder, choose:
 
 ```text
