@@ -1,6 +1,6 @@
 #!/bin/zsh
 
-# <xbar.title>Agent Usage</xbar.title>
+# <xbar.title>AI Usage</xbar.title>
 # <xbar.version>v1.3.0</xbar.version>
 # <xbar.author>local</xbar.author>
 # <xbar.desc>Shows today's Claude/Codex usage in the macOS menu bar.</xbar.desc>
@@ -16,7 +16,6 @@ config_file="$plugin_dir/.usage-counter.conf"
 stderr_dir="${TMPDIR:-/tmp}/swiftbar-agent-usage"
 cache_output_file="$stderr_dir/menu.out"
 cache_meta_file="$stderr_dir/menu.meta"
-payload_file="$stderr_dir/payload.json"
 
 mode="both"
 reset_hour="0"
@@ -57,7 +56,7 @@ write_config() {
 }
 
 clear_cache() {
-  rm -f "$cache_output_file" "$cache_meta_file" "$payload_file"
+  rm -f "$cache_output_file" "$cache_meta_file" "$stderr_dir/payload.json"
 }
 
 read_config
@@ -98,6 +97,15 @@ case "$1" in
 esac
 
 mkdir -p "$stderr_dir"
+run_dir="$(mktemp -d "$stderr_dir/run.XXXXXX")"
+cleanup_run_dir() {
+  [[ -n "$run_dir" && -d "$run_dir" ]] && rm -rf "$run_dir"
+}
+trap cleanup_run_dir EXIT HUP INT TERM
+
+payload_file="$run_dir/payload.json"
+render_output_file="$run_dir/menu.out"
+cache_meta_temp="$run_dir/menu.meta"
 
 ccusage_available="true"
 if command -v ccusage >/dev/null 2>&1; then
@@ -159,8 +167,8 @@ fi
 
 collect_report_files() {
   local source="$1"
-  local stdout_file="$stderr_dir/$source.out"
-  local stderr_file="$stderr_dir/$source.err"
+  local stdout_file="$run_dir/$source.out"
+  local stderr_file="$run_dir/$source.err"
   local command_text="${ccusage_cmd[*]} $source daily --json --since $query_date --until $query_date --offline ${timezone_args[*]}"
 
   if [[ "$ccusage_available" != "true" ]]; then
@@ -242,7 +250,7 @@ for (const spec of process.env.REPORT_SPECS ? process.env.REPORT_SPECS.split("\n
 fs.writeFileSync(process.env.PAYLOAD_FILE, JSON.stringify(payload));
 NODE_PAYLOAD
 
-REPORT_SPECS="${(F)report_specs}" PAYLOAD_FILE="$payload_file" /usr/bin/env node <<'NODE_RENDER' > "$cache_output_file"
+REPORT_SPECS="${(F)report_specs}" PAYLOAD_FILE="$payload_file" /usr/bin/env node <<'NODE_RENDER' > "$render_output_file"
 const fs = require("fs");
 const payload = JSON.parse(fs.readFileSync(process.env.PAYLOAD_FILE, "utf8"));
 
@@ -457,13 +465,21 @@ console.log(`Config: ${queryDate}`);
 NODE_RENDER
 node_exit=$?
 
-cat "$cache_output_file"
-
 if (( node_exit == 0 )); then
+  cat "$render_output_file"
+  mv -f "$render_output_file" "$cache_output_file"
   {
     echo "CACHE_KEY=$cache_key"
     echo "LAST_RUN=$now"
-  } > "$cache_meta_file"
+  } > "$cache_meta_temp"
+  mv -f "$cache_meta_temp" "$cache_meta_file"
 else
+  if [[ -s "$render_output_file" ]]; then
+    cat "$render_output_file"
+  else
+    echo "AI ?"
+    echo "---"
+    echo "Could not render usage output."
+  fi
   rm -f "$cache_meta_file"
 fi

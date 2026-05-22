@@ -1,7 +1,7 @@
 #!/bin/zsh
 
-# <xbar.title>Agent Usage</xbar.title>
-# <xbar.version>v1.2.0</xbar.version>
+# <xbar.title>AI Usage</xbar.title>
+# <xbar.version>v1.3.0</xbar.version>
 # <xbar.author>local</xbar.author>
 # <xbar.desc>Shows today's Claude/Codex usage in the macOS menu bar.</xbar.desc>
 # <xbar.dependencies>ccusage,node</xbar.dependencies>
