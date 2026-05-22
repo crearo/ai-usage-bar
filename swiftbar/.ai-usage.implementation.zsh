@@ -18,6 +18,7 @@ cache_output_file="$stderr_dir/menu.out"
 cache_meta_file="$stderr_dir/menu.meta"
 
 mode="both"
+range="today"
 reset_hour="0"
 refresh_seconds="60"
 
@@ -29,12 +30,18 @@ read_config() {
       MODE) mode="$value" ;;
       RESET_HOUR) reset_hour="$value" ;;
       REFRESH_SECONDS) refresh_seconds="$value" ;;
+      RANGE) range="$value" ;;
     esac
   done < "$config_file"
 
   case "$mode" in
     claude|codex|both) ;;
     *) mode="both" ;;
+  esac
+
+  case "$range" in
+    today|week|last7|month|last30) ;;
+    *) range="today" ;;
   esac
 
   if [[ "$reset_hour" != <-> ]] || (( reset_hour < 0 || reset_hour > 23 )); then
@@ -50,6 +57,7 @@ read_config() {
 write_config() {
   {
     echo "MODE=$mode"
+    echo "RANGE=$range"
     echo "RESET_HOUR=$reset_hour"
     echo "REFRESH_SECONDS=$refresh_seconds"
   } > "$config_file"
@@ -66,6 +74,16 @@ case "$1" in
     case "$2" in
       claude|codex|both)
         mode="$2"
+        write_config
+        clear_cache
+        ;;
+    esac
+    exit 0
+    ;;
+  set-range)
+    case "$2" in
+      today|week|last7|month|last30)
+        range="$2"
         write_config
         clear_cache
         ;;
@@ -119,32 +137,95 @@ else
   ccusage_cmd=()
 fi
 
-display_date="$(date -v-"${reset_hour}"H +%F 2>/dev/null || date +%F)"
-query_date="$(date -v-"${reset_hour}"H +%Y%m%d 2>/dev/null || date +%Y%m%d)"
+date_days_ago() {
+  local days="$1"
+  local format="$2"
+
+  if (( days == 0 )); then
+    date +"$format"
+  else
+    date -v-"${days}"d +"$format" 2>/dev/null || date -d "$days days ago" +"$format"
+  fi
+}
+
+date_hours_ago() {
+  local hours="$1"
+  local format="$2"
+
+  if (( hours == 0 )); then
+    date +"$format"
+  else
+    date -v-"${hours}"H +"$format" 2>/dev/null || date -d "$hours hours ago" +"$format"
+  fi
+}
+
+date_month_start() {
+  local format="$1"
+  date -v1d +"$format" 2>/dev/null || date -d "$(date +%Y-%m-01)" +"$format"
+}
+
 timezone_name=""
 timezone_args=()
+display_date="$(date +%F)"
+since_display_date="$display_date"
+until_display_date="$display_date"
+since_date="$(date +%Y%m%d)"
+until_date="$since_date"
+range_label="Today"
 
-if (( reset_hour > 0 )); then
-  offset_raw="$(date +%z)"
-  offset_sign="${offset_raw[1,1]}"
-  offset_hour="${offset_raw[2,3]}"
-  local_offset=$((10#$offset_hour))
-  if [[ "$offset_sign" == "-" ]]; then
-    local_offset=$((-local_offset))
-  fi
+case "$range" in
+  today)
+    display_date="$(date_hours_ago "$reset_hour" "%F")"
+    since_display_date="$display_date"
+    until_display_date="$display_date"
+    since_date="$(date_hours_ago "$reset_hour" "%Y%m%d")"
+    until_date="$since_date"
+    range_label="Today"
 
-  shifted_offset=$((local_offset - reset_hour))
-  if (( shifted_offset == 0 )); then
-    timezone_name="UTC"
-  elif (( shifted_offset > 0 )); then
-    timezone_name="Etc/GMT-${shifted_offset}"
-  else
-    timezone_name="Etc/GMT+$((-shifted_offset))"
-  fi
-  timezone_args=(--timezone "$timezone_name")
-fi
+    if (( reset_hour > 0 )); then
+      offset_raw="$(date +%z)"
+      offset_sign="${offset_raw[1,1]}"
+      offset_hour="${offset_raw[2,3]}"
+      local_offset=$((10#$offset_hour))
+      if [[ "$offset_sign" == "-" ]]; then
+        local_offset=$((-local_offset))
+      fi
 
-cache_key="$mode|$reset_hour|$refresh_seconds|$display_date|$query_date|$timezone_name"
+      shifted_offset=$((local_offset - reset_hour))
+      if (( shifted_offset == 0 )); then
+        timezone_name="UTC"
+      elif (( shifted_offset > 0 )); then
+        timezone_name="Etc/GMT-${shifted_offset}"
+      else
+        timezone_name="Etc/GMT+$((-shifted_offset))"
+      fi
+      timezone_args=(--timezone "$timezone_name")
+    fi
+    ;;
+  week)
+    days_since_monday=$(($(date +%u) - 1))
+    since_date="$(date_days_ago "$days_since_monday" "%Y%m%d")"
+    since_display_date="$(date_days_ago "$days_since_monday" "%F")"
+    range_label="Since Monday"
+    ;;
+  last7)
+    since_date="$(date_days_ago 6 "%Y%m%d")"
+    since_display_date="$(date_days_ago 6 "%F")"
+    range_label="Last 7 days"
+    ;;
+  month)
+    since_date="$(date_month_start "%Y%m%d")"
+    since_display_date="$(date_month_start "%F")"
+    range_label="Since month start"
+    ;;
+  last30)
+    since_date="$(date_days_ago 29 "%Y%m%d")"
+    since_display_date="$(date_days_ago 29 "%F")"
+    range_label="Last 30 days"
+    ;;
+esac
+
+cache_key="$mode|$range|$reset_hour|$refresh_seconds|$since_date|$until_date|$timezone_name"
 cache_key_saved=""
 cache_last_run="0"
 now="$(date +%s)"
@@ -169,7 +250,7 @@ collect_report_files() {
   local source="$1"
   local stdout_file="$run_dir/$source.out"
   local stderr_file="$run_dir/$source.err"
-  local command_text="${ccusage_cmd[*]} $source daily --json --since $query_date --until $query_date --offline ${timezone_args[*]}"
+  local command_text="${ccusage_cmd[*]} $source daily --json --since $since_date --until $until_date --offline ${timezone_args[*]}"
 
   if [[ "$ccusage_available" != "true" ]]; then
     printf "%s\n" "Missing dependency: install ccusage, Node.js/npm, or Bun." >"$stderr_file"
@@ -177,7 +258,7 @@ collect_report_files() {
     return
   fi
 
-  "${ccusage_cmd[@]}" "$source" daily --json --since "$query_date" --until "$query_date" --offline "${timezone_args[@]}" >"$stdout_file" 2>"$stderr_file"
+  "${ccusage_cmd[@]}" "$source" daily --json --since "$since_date" --until "$until_date" --offline "${timezone_args[@]}" >"$stdout_file" 2>"$stderr_file"
   local exit_code=$?
 
   local stderr_text=""
@@ -214,10 +295,15 @@ esac
 REPORT_SPECS="${(F)report_specs}" \
 PAYLOAD_FILE="$payload_file" \
 MODE="$mode" \
+RANGE="$range" \
+RANGE_LABEL="$range_label" \
 RESET_HOUR="$reset_hour" \
 REFRESH_SECONDS="$refresh_seconds" \
 DISPLAY_DATE="$display_date" \
-QUERY_DATE="$query_date" \
+SINCE_DATE="$since_date" \
+UNTIL_DATE="$until_date" \
+SINCE_DISPLAY_DATE="$since_display_date" \
+UNTIL_DISPLAY_DATE="$until_display_date" \
 TIMEZONE_NAME="$timezone_name" \
 SCRIPT_PATH="$script_path" \
 /usr/bin/env node <<'NODE_PAYLOAD'
@@ -225,10 +311,15 @@ const fs = require("fs");
 
 const payload = {
   mode: process.env.MODE || "both",
+  range: process.env.RANGE || "today",
+  rangeLabel: process.env.RANGE_LABEL || "Today",
   resetHour: Number.parseInt(process.env.RESET_HOUR || "0", 10),
   refreshSeconds: Number.parseInt(process.env.REFRESH_SECONDS || "60", 10),
   displayDate: process.env.DISPLAY_DATE || "",
-  queryDate: process.env.QUERY_DATE || "",
+  sinceDate: process.env.SINCE_DATE || "",
+  untilDate: process.env.UNTIL_DATE || "",
+  sinceDisplayDate: process.env.SINCE_DISPLAY_DATE || "",
+  untilDisplayDate: process.env.UNTIL_DISPLAY_DATE || "",
   timezoneName: process.env.TIMEZONE_NAME || "",
   scriptPath: process.env.SCRIPT_PATH || "",
   reports: [],
@@ -255,10 +346,15 @@ const fs = require("fs");
 const payload = JSON.parse(fs.readFileSync(process.env.PAYLOAD_FILE, "utf8"));
 
 const mode = payload.mode || "both";
+const range = payload.range || "today";
+const rangeLabel = payload.rangeLabel || "Today";
 const resetHour = Number.isFinite(payload.resetHour) ? payload.resetHour : 0;
 const refreshSeconds = Number.isFinite(payload.refreshSeconds) ? payload.refreshSeconds : 60;
 const displayDate = payload.displayDate || "";
-const queryDate = payload.queryDate || "";
+const sinceDate = payload.sinceDate || "";
+const untilDate = payload.untilDate || "";
+const sinceDisplayDate = payload.sinceDisplayDate || displayDate;
+const untilDisplayDate = payload.untilDisplayDate || displayDate;
 const timezoneName = payload.timezoneName || "system timezone";
 const scriptPath = payload.scriptPath || "";
 
@@ -317,6 +413,56 @@ function emptyUsage(label, status = "missing_data", error = "") {
   };
 }
 
+function usageFromRows(label, rows) {
+  const usage = emptyUsage(label, "ok");
+  const models = new Set();
+
+  for (const row of rows) {
+    const input = numberValue(row.inputTokens);
+    const output = numberValue(row.outputTokens);
+    const cacheCreate = numberValue(row.cacheCreationTokens);
+    const cacheRead = numberValue(row.cacheReadTokens, row.cachedInputTokens);
+    const reasoning = numberValue(row.reasoningOutputTokens);
+    const total = numberValue(row.totalTokens, input + output + cacheCreate + cacheRead + reasoning);
+    const cost = numberValue(row.costUSD, row.totalCost);
+
+    usage.input += input;
+    usage.output += output;
+    usage.cacheCreate += cacheCreate;
+    usage.cacheRead += cacheRead;
+    usage.reasoning += reasoning;
+    usage.total += total;
+    usage.cost += cost;
+    for (const model of modelNames(row)) models.add(model);
+  }
+
+  usage.models = [...models];
+  return usage;
+}
+
+function usageFromSummary(label, summary) {
+  const input = numberValue(summary.inputTokens, summary.totalInputTokens);
+  const output = numberValue(summary.outputTokens, summary.totalOutputTokens);
+  const cacheCreate = numberValue(summary.cacheCreationTokens, summary.totalCacheCreationTokens);
+  const cacheRead = numberValue(summary.cacheReadTokens, summary.cachedInputTokens, summary.totalCacheReadTokens, summary.totalCachedInputTokens);
+  const reasoning = numberValue(summary.reasoningOutputTokens, summary.totalReasoningOutputTokens);
+  const total = numberValue(summary.totalTokens, input + output + cacheCreate + cacheRead + reasoning);
+  const cost = numberValue(summary.costUSD, summary.totalCost, summary.totalCostUSD);
+
+  return {
+    label,
+    status: "ok",
+    input,
+    output,
+    cacheCreate,
+    cacheRead,
+    reasoning,
+    total,
+    cost,
+    models: modelNames(summary),
+  };
+}
+
 function normalizeReport(report) {
   const label = report.source === "claude" ? "Claude" : report.source === "codex" ? "Codex" : report.source;
 
@@ -331,35 +477,11 @@ function normalizeReport(report) {
 
   const rows = Array.isArray(parsed.daily) ? parsed.daily : Array.isArray(parsed.data) ? parsed.data : [];
   const summary = parsed.totals || parsed.summary || {};
-  const row = rows.find((item) => item.date === displayDate) || rows[rows.length - 1] || {};
+  const datedRows = rows.filter((item) => typeof item.date === "string" && item.date >= sinceDisplayDate && item.date <= untilDisplayDate);
+  const rowsToUse = datedRows.length > 0 ? datedRows : rows;
 
-  const input = numberValue(row.inputTokens, summary.inputTokens, summary.totalInputTokens);
-  const output = numberValue(row.outputTokens, summary.outputTokens, summary.totalOutputTokens);
-  const cacheCreate = numberValue(row.cacheCreationTokens, summary.cacheCreationTokens, summary.totalCacheCreationTokens);
-  const cacheRead = numberValue(
-    row.cacheReadTokens,
-    row.cachedInputTokens,
-    summary.cacheReadTokens,
-    summary.cachedInputTokens,
-    summary.totalCacheReadTokens,
-    summary.totalCachedInputTokens,
-  );
-  const reasoning = numberValue(row.reasoningOutputTokens, summary.reasoningOutputTokens, summary.totalReasoningOutputTokens);
-  const total = numberValue(row.totalTokens, summary.totalTokens, input + output + cacheCreate + cacheRead + reasoning);
-  const cost = numberValue(row.costUSD, row.totalCost, summary.costUSD, summary.totalCost, summary.totalCostUSD);
-
-  return {
-    label,
-    status: "ok",
-    input,
-    output,
-    cacheCreate,
-    cacheRead,
-    reasoning,
-    total,
-    cost,
-    models: modelNames(row),
-  };
+  if (rowsToUse.length > 0) return usageFromRows(label, rowsToUse);
+  return usageFromSummary(label, summary);
 }
 
 function addReports(reports) {
@@ -404,10 +526,15 @@ const hasErrors = reports.some((report) => report.status === "error");
 console.log(`${modeLabel()} ${money(total.cost)} ${compactNumber(total.total)}${hasErrors ? " !" : ""}`);
 console.log("---");
 console.log(`Mode: ${modeLabel()}`);
+console.log(`Range: ${rangeLabel}`);
 console.log(`Refresh: ${refreshLabel(refreshSeconds)}`);
-console.log(`Usage day: ${displayDate}`);
-console.log(`Reset time: ${resetLabel}`);
-if (resetHour > 0) console.log(`Grouping timezone: ${timezoneName}`);
+if (range === "today") {
+  console.log(`Usage day: ${displayDate}`);
+  console.log(`Reset time: ${resetLabel}`);
+  if (resetHour > 0) console.log(`Grouping timezone: ${timezoneName}`);
+} else {
+  console.log(`Usage dates: ${sinceDisplayDate} to ${untilDisplayDate}`);
+}
 console.log(`Cost: ${money(total.cost)}`);
 console.log(`Total tokens: ${fullNumber(total.total)}`);
 console.log(`Input: ${fullNumber(total.input)}`);
@@ -440,6 +567,18 @@ if (errorReports.length > 0) {
 }
 
 console.log("---");
+console.log("Range");
+for (const option of [
+  ["today", "Today"],
+  ["week", "Since Monday"],
+  ["last7", "Last 7 days"],
+  ["month", "Since month start"],
+  ["last30", "Last 30 days"],
+]) {
+  console.log(`${selected(range, option[0])} ${option[1]} | ${action("set-range", option[0])}`);
+}
+
+console.log("---");
 console.log("Mode");
 console.log(`${selected(mode, "codex")} Codex only | ${action("set-mode", "codex")}`);
 console.log(`${selected(mode, "claude")} Claude only | ${action("set-mode", "claude")}`);
@@ -451,17 +590,19 @@ for (const seconds of [15, 30, 60, 300]) {
   console.log(`${selected(refreshSeconds, seconds)} ${refreshLabel(seconds)} | ${action("set-refresh-seconds", seconds)}`);
 }
 
-console.log("---");
-console.log("Reset time");
-for (const hour of [0, 4, 8, 12]) {
-  const label = `${String(hour).padStart(2, "0")}:00`;
-  console.log(`${selected(resetHour, hour)} ${label} | ${action("set-reset-hour", hour)}`);
+if (range === "today") {
+  console.log("---");
+  console.log("Reset time");
+  for (const hour of [0, 4, 8, 12]) {
+    const label = `${String(hour).padStart(2, "0")}:00`;
+    console.log(`${selected(resetHour, hour)} ${label} | ${action("set-reset-hour", hour)}`);
+  }
 }
 
 console.log("---");
 console.log(`Refresh now | ${action("force-refresh", "1")}`);
 console.log("Made with <3 by crearo | href=https://github.com/crearo/ai-usage-bar");
-console.log(`Config: ${queryDate}`);
+console.log(`Config: ${range} ${sinceDate}-${untilDate}`);
 NODE_RENDER
 node_exit=$?
 
