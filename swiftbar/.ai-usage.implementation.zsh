@@ -1,7 +1,7 @@
 #!/bin/zsh
 
 # <xbar.title>Agent Usage</xbar.title>
-# <xbar.version>v1.2.0</xbar.version>
+# <xbar.version>v1.3.0</xbar.version>
 # <xbar.author>local</xbar.author>
 # <xbar.desc>Shows today's Claude/Codex usage in the macOS menu bar.</xbar.desc>
 # <xbar.dependencies>ccusage,node</xbar.dependencies>
@@ -16,6 +16,7 @@ config_file="$plugin_dir/.usage-counter.conf"
 stderr_dir="${TMPDIR:-/tmp}/swiftbar-agent-usage"
 cache_output_file="$stderr_dir/menu.out"
 cache_meta_file="$stderr_dir/menu.meta"
+payload_file="$stderr_dir/payload.json"
 
 mode="both"
 reset_hour="0"
@@ -56,7 +57,7 @@ write_config() {
 }
 
 clear_cache() {
-  rm -f "$cache_output_file" "$cache_meta_file"
+  rm -f "$cache_output_file" "$cache_meta_file" "$payload_file"
 }
 
 read_config
@@ -98,6 +99,7 @@ esac
 
 mkdir -p "$stderr_dir"
 
+ccusage_available="true"
 if command -v ccusage >/dev/null 2>&1; then
   ccusage_cmd=(ccusage)
 elif command -v npx >/dev/null 2>&1; then
@@ -105,10 +107,8 @@ elif command -v npx >/dev/null 2>&1; then
 elif command -v bunx >/dev/null 2>&1; then
   ccusage_cmd=(bunx ccusage@latest)
 else
-  echo "Usage ? | color=#d14343 sfimage=exclamationmark.triangle"
-  echo "---"
-  echo "Missing dependency: install ccusage, Node.js/npm, or Bun."
-  exit 0
+  ccusage_available="false"
+  ccusage_cmd=()
 fi
 
 display_date="$(date -v-"${reset_hour}"H +%F 2>/dev/null || date +%F)"
@@ -157,78 +157,106 @@ if [[ -s "$cache_output_file" && "$cache_key_saved" == "$cache_key" && "$cache_l
   fi
 fi
 
-empty_report() {
-  printf '{"daily":[],"totals":{"cacheCreationTokens":0,"cacheReadTokens":0,"cachedInputTokens":0,"costUSD":0,"inputTokens":0,"outputTokens":0,"reasoningOutputTokens":0,"totalCost":0,"totalTokens":0}}'
-}
-
-run_report() {
+collect_report_files() {
   local source="$1"
+  local stdout_file="$stderr_dir/$source.out"
   local stderr_file="$stderr_dir/$source.err"
-  local output
+  local command_text="${ccusage_cmd[*]} $source daily --json --since $query_date --until $query_date --offline ${timezone_args[*]}"
 
-  output="$("${ccusage_cmd[@]}" "$source" daily --json --since "$query_date" --until "$query_date" --offline "${timezone_args[@]}" 2>"$stderr_file")"
-  local exit_code=$?
-
-  if (( exit_code != 0 )); then
-    if { [[ -s "$stderr_file" ]] && grep -q "No valid .* data directories found" "$stderr_file"; } || printf "%s" "$output" | grep -q "No valid .* data directories found"; then
-      empty_report
-      return
-    fi
-    echo "Usage ? | color=#d14343 sfimage=exclamationmark.triangle"
-    echo "---"
-    echo "Command failed:"
-    echo "${ccusage_cmd[*]} $source daily --json --since $query_date --until $query_date --offline ${timezone_args[*]}"
-    echo "---"
-    if [[ -s "$stderr_file" ]]; then
-      tail -n 20 "$stderr_file"
-    else
-      echo "$output"
-    fi
-    exit 0
+  if [[ "$ccusage_available" != "true" ]]; then
+    printf "%s\n" "Missing dependency: install ccusage, Node.js/npm, or Bun." >"$stderr_file"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$source" "error" "ccusage unavailable" "$stdout_file" "$stderr_file"
+    return
   fi
 
-  printf "%s" "$output"
+  "${ccusage_cmd[@]}" "$source" daily --json --since "$query_date" --until "$query_date" --offline "${timezone_args[@]}" >"$stdout_file" 2>"$stderr_file"
+  local exit_code=$?
+
+  local stderr_text=""
+  local stdout_text=""
+  [[ -s "$stderr_file" ]] && stderr_text="$(cat "$stderr_file")"
+  [[ -s "$stdout_file" ]] && stdout_text="$(cat "$stdout_file")"
+
+  if (( exit_code != 0 )); then
+    if printf '%s\n%s' "$stderr_text" "$stdout_text" | grep -q "No valid .* data directories found"; then
+      printf '%s\t%s\t%s\t%s\t%s\n' "$source" "missing_data" "$command_text" "$stdout_file" "$stderr_file"
+    else
+      printf '%s\t%s\t%s\t%s\t%s\n' "$source" "error" "$command_text" "$stdout_file" "$stderr_file"
+    fi
+    return
+  fi
+
+  printf '%s\t%s\t%s\t%s\t%s\n' "$source" "ok" "$command_text" "$stdout_file" "$stderr_file"
 }
 
-claude_json="{}"
-codex_json="{}"
-
+report_specs=()
 case "$mode" in
   claude)
-    claude_json="$(run_report claude)"
+    report_specs+=("$(collect_report_files claude)")
     ;;
   codex)
-    codex_json="$(run_report codex)"
+    report_specs+=("$(collect_report_files codex)")
     ;;
   both)
-    claude_json="$(run_report claude)"
-    codex_json="$(run_report codex)"
+    report_specs+=("$(collect_report_files claude)")
+    report_specs+=("$(collect_report_files codex)")
     ;;
 esac
 
-menu_output="$(MODE="$mode" \
+REPORT_SPECS="${(F)report_specs}" \
+PAYLOAD_FILE="$payload_file" \
+MODE="$mode" \
 RESET_HOUR="$reset_hour" \
 REFRESH_SECONDS="$refresh_seconds" \
 DISPLAY_DATE="$display_date" \
 QUERY_DATE="$query_date" \
 TIMEZONE_NAME="$timezone_name" \
 SCRIPT_PATH="$script_path" \
-CLAUDE_USAGE_JSON="$claude_json" \
-CODEX_USAGE_JSON="$codex_json" \
-/usr/bin/env node <<'NODE'
-const mode = process.env.MODE || "both";
-const resetHour = Number.parseInt(process.env.RESET_HOUR || "0", 10);
-const refreshSeconds = Number.parseInt(process.env.REFRESH_SECONDS || "60", 10);
-const displayDate = process.env.DISPLAY_DATE || "";
-const queryDate = process.env.QUERY_DATE || "";
-const timezoneName = process.env.TIMEZONE_NAME || "system timezone";
-const scriptPath = process.env.SCRIPT_PATH || "";
+/usr/bin/env node <<'NODE_PAYLOAD'
+const fs = require("fs");
+
+const payload = {
+  mode: process.env.MODE || "both",
+  resetHour: Number.parseInt(process.env.RESET_HOUR || "0", 10),
+  refreshSeconds: Number.parseInt(process.env.REFRESH_SECONDS || "60", 10),
+  displayDate: process.env.DISPLAY_DATE || "",
+  queryDate: process.env.QUERY_DATE || "",
+  timezoneName: process.env.TIMEZONE_NAME || "",
+  scriptPath: process.env.SCRIPT_PATH || "",
+  reports: [],
+};
+
+function readMaybe(path) {
+  if (!path || !fs.existsSync(path)) return "";
+  return fs.readFileSync(path, "utf8");
+}
+
+for (const spec of process.env.REPORT_SPECS ? process.env.REPORT_SPECS.split("\n") : []) {
+  if (!spec.trim()) continue;
+  const [source, status, command, stdoutPath, stderrPath] = spec.split("\t");
+  const stdout = readMaybe(stdoutPath);
+  const stderr = readMaybe(stderrPath);
+  payload.reports.push({ source, status, command, stdout, stderr });
+}
+
+fs.writeFileSync(process.env.PAYLOAD_FILE, JSON.stringify(payload));
+NODE_PAYLOAD
+
+REPORT_SPECS="${(F)report_specs}" PAYLOAD_FILE="$payload_file" /usr/bin/env node <<'NODE_RENDER' > "$cache_output_file"
+const fs = require("fs");
+const payload = JSON.parse(fs.readFileSync(process.env.PAYLOAD_FILE, "utf8"));
+
+const mode = payload.mode || "both";
+const resetHour = Number.isFinite(payload.resetHour) ? payload.resetHour : 0;
+const refreshSeconds = Number.isFinite(payload.refreshSeconds) ? payload.refreshSeconds : 60;
+const displayDate = payload.displayDate || "";
+const queryDate = payload.queryDate || "";
+const timezoneName = payload.timezoneName || "system timezone";
+const scriptPath = payload.scriptPath || "";
 
 function numberValue(...values) {
   for (const value of values) {
-    if (typeof value === "number" && Number.isFinite(value)) {
-      return value;
-    }
+    if (typeof value === "number" && Number.isFinite(value)) return value;
   }
   return 0;
 }
@@ -254,7 +282,7 @@ function parseJson(raw, label) {
   try {
     return JSON.parse((raw || "{}").trim() || "{}");
   } catch (error) {
-    throw new Error(`${label}: ${error.message}`);
+    return { parseError: `${label}: ${error.message}` };
   }
 }
 
@@ -265,19 +293,41 @@ function modelNames(row) {
   return [];
 }
 
-function normalizeReport(label, raw) {
-  const report = parseJson(raw, label);
-  const rows = Array.isArray(report.daily) ? report.daily : Array.isArray(report.data) ? report.data : [];
-  const summary = report.totals || report.summary || {};
+function emptyUsage(label, status = "missing_data", error = "") {
+  return {
+    label,
+    status,
+    error,
+    input: 0,
+    output: 0,
+    cacheCreate: 0,
+    cacheRead: 0,
+    reasoning: 0,
+    total: 0,
+    cost: 0,
+    models: [],
+  };
+}
+
+function normalizeReport(report) {
+  const label = report.source === "claude" ? "Claude" : report.source === "codex" ? "Codex" : report.source;
+
+  if (report.status === "missing_data") return emptyUsage(label, "missing_data");
+  if (report.status === "error") {
+    const detail = (report.stderr || report.stdout || "Unknown error").trim().split("\n").slice(0, 3).join(" ");
+    return emptyUsage(label, "error", detail || "Unknown error");
+  }
+
+  const parsed = parseJson(report.stdout, label);
+  if (parsed.parseError) return emptyUsage(label, "error", parsed.parseError);
+
+  const rows = Array.isArray(parsed.daily) ? parsed.daily : Array.isArray(parsed.data) ? parsed.data : [];
+  const summary = parsed.totals || parsed.summary || {};
   const row = rows.find((item) => item.date === displayDate) || rows[rows.length - 1] || {};
 
   const input = numberValue(row.inputTokens, summary.inputTokens, summary.totalInputTokens);
   const output = numberValue(row.outputTokens, summary.outputTokens, summary.totalOutputTokens);
-  const cacheCreate = numberValue(
-    row.cacheCreationTokens,
-    summary.cacheCreationTokens,
-    summary.totalCacheCreationTokens,
-  );
+  const cacheCreate = numberValue(row.cacheCreationTokens, summary.cacheCreationTokens, summary.totalCacheCreationTokens);
   const cacheRead = numberValue(
     row.cacheReadTokens,
     row.cachedInputTokens,
@@ -286,20 +336,13 @@ function normalizeReport(label, raw) {
     summary.totalCacheReadTokens,
     summary.totalCachedInputTokens,
   );
-  const reasoning = numberValue(
-    row.reasoningOutputTokens,
-    summary.reasoningOutputTokens,
-    summary.totalReasoningOutputTokens,
-  );
-  const total = numberValue(
-    row.totalTokens,
-    summary.totalTokens,
-    input + output + cacheCreate + cacheRead + reasoning,
-  );
+  const reasoning = numberValue(row.reasoningOutputTokens, summary.reasoningOutputTokens, summary.totalReasoningOutputTokens);
+  const total = numberValue(row.totalTokens, summary.totalTokens, input + output + cacheCreate + cacheRead + reasoning);
   const cost = numberValue(row.costUSD, row.totalCost, summary.costUSD, summary.totalCost, summary.totalCostUSD);
 
   return {
     label,
+    status: "ok",
     input,
     output,
     cacheCreate,
@@ -312,17 +355,7 @@ function normalizeReport(label, raw) {
 }
 
 function addReports(reports) {
-  const total = {
-    input: 0,
-    output: 0,
-    cacheCreate: 0,
-    cacheRead: 0,
-    reasoning: 0,
-    total: 0,
-    cost: 0,
-    models: new Set(),
-  };
-
+  const total = { input: 0, output: 0, cacheCreate: 0, cacheRead: 0, reasoning: 0, total: 0, cost: 0, models: new Set() };
   for (const report of reports) {
     total.input += report.input;
     total.output += report.output;
@@ -333,7 +366,6 @@ function addReports(reports) {
     total.cost += report.cost;
     for (const model of report.models) total.models.add(model);
   }
-
   return total;
 }
 
@@ -355,80 +387,83 @@ function action(command, value) {
   return `bash=${scriptPath} param1=${command} param2=${value} terminal=false refresh=true`;
 }
 
-try {
-  const reports = [];
-  if (mode === "claude" || mode === "both") {
-    reports.push(normalizeReport("Claude", process.env.CLAUDE_USAGE_JSON));
-  }
-  if (mode === "codex" || mode === "both") {
-    reports.push(normalizeReport("Codex", process.env.CODEX_USAGE_JSON));
-  }
+const reports = payload.reports.map(normalizeReport);
+const total = addReports(reports);
+const models = [...total.models].length > 0 ? [...total.models].join(", ") : "No model data";
+const resetLabel = `${String(resetHour).padStart(2, "0")}:00`;
+const hasErrors = reports.some((report) => report.status === "error");
 
-  const total = addReports(reports);
-  const models = [...total.models].length > 0 ? [...total.models].join(", ") : "No model data";
-  const resetLabel = `${String(resetHour).padStart(2, "0")}:00`;
+console.log(`${modeLabel()} ${money(total.cost)} ${compactNumber(total.total)}${hasErrors ? " !" : ""}`);
+console.log("---");
+console.log(`Mode: ${modeLabel()}`);
+console.log(`Refresh: ${refreshLabel(refreshSeconds)}`);
+console.log(`Usage day: ${displayDate}`);
+console.log(`Reset time: ${resetLabel}`);
+if (resetHour > 0) console.log(`Grouping timezone: ${timezoneName}`);
+console.log(`Cost: ${money(total.cost)}`);
+console.log(`Total tokens: ${fullNumber(total.total)}`);
+console.log(`Input: ${fullNumber(total.input)}`);
+console.log(`Output: ${fullNumber(total.output)}`);
+if (total.reasoning > 0) console.log(`Reasoning output: ${fullNumber(total.reasoning)}`);
+if (total.cacheCreate > 0) console.log(`Cache create: ${fullNumber(total.cacheCreate)}`);
+if (total.cacheRead > 0) console.log(`Cache read: ${fullNumber(total.cacheRead)}`);
+console.log(`Models: ${models}`);
 
-  console.log(`${modeLabel()} ${money(total.cost)} ${compactNumber(total.total)}`);
+if (reports.length > 1) {
   console.log("---");
-  console.log(`Mode: ${modeLabel()}`);
-  console.log(`Refresh: ${refreshLabel(refreshSeconds)}`);
-  console.log(`Usage day: ${displayDate}`);
-  console.log(`Reset time: ${resetLabel}`);
-  if (resetHour > 0) console.log(`Grouping timezone: ${timezoneName}`);
-  console.log(`Cost: ${money(total.cost)}`);
-  console.log(`Total tokens: ${fullNumber(total.total)}`);
-  console.log(`Input: ${fullNumber(total.input)}`);
-  console.log(`Output: ${fullNumber(total.output)}`);
-  if (total.reasoning > 0) console.log(`Reasoning output: ${fullNumber(total.reasoning)}`);
-  if (total.cacheCreate > 0) console.log(`Cache create: ${fullNumber(total.cacheCreate)}`);
-  if (total.cacheRead > 0) console.log(`Cache read: ${fullNumber(total.cacheRead)}`);
-  console.log(`Models: ${models}`);
-
-  if (reports.length > 1) {
-    console.log("---");
-    for (const report of reports) {
+  for (const report of reports) {
+    if (report.status === "missing_data") {
+      console.log(`${report.label}: no data`);
+    } else if (report.status === "error") {
+      console.log(`${report.label}: error`);
+    } else {
       console.log(`${report.label}: ${money(report.cost)} ${compactNumber(report.total)}`);
     }
   }
-
-  console.log("---");
-  console.log("Mode");
-  console.log(`${selected(mode, "codex")} Codex only | ${action("set-mode", "codex")}`);
-  console.log(`${selected(mode, "claude")} Claude only | ${action("set-mode", "claude")}`);
-  console.log(`${selected(mode, "both")} Claude + Codex | ${action("set-mode", "both")}`);
-
-  console.log("---");
-  console.log("Refresh interval");
-  for (const seconds of [15, 30, 60, 300]) {
-    console.log(`${selected(refreshSeconds, seconds)} ${refreshLabel(seconds)} | ${action("set-refresh-seconds", seconds)}`);
-  }
-
-  console.log("---");
-  console.log("Reset time");
-  for (const hour of [0, 4, 8, 12]) {
-    const label = `${String(hour).padStart(2, "0")}:00`;
-    console.log(`${selected(resetHour, hour)} ${label} | ${action("set-reset-hour", hour)}`);
-  }
-
-  console.log("---");
-  console.log(`Refresh now | ${action("force-refresh", "1")}`);
-  console.log("Made with <3 by crearo | href=https://github.com/crearo/ai-usage-bar");
-  console.log(`Config: ${queryDate}`);
-} catch (error) {
-  console.log("Usage ? | color=#d14343 sfimage=exclamationmark.triangle");
-  console.log("---");
-  console.log(`Could not parse ccusage JSON: ${error.message}`);
 }
-NODE
-)"
+
+const errorReports = reports.filter((report) => report.status === "error");
+if (errorReports.length > 0) {
+  console.log("---");
+  console.log("Errors");
+  for (const report of errorReports) {
+    console.log(`${report.label}: ${report.error || "Unknown error"}`);
+  }
+}
+
+console.log("---");
+console.log("Mode");
+console.log(`${selected(mode, "codex")} Codex only | ${action("set-mode", "codex")}`);
+console.log(`${selected(mode, "claude")} Claude only | ${action("set-mode", "claude")}`);
+console.log(`${selected(mode, "both")} Claude + Codex | ${action("set-mode", "both")}`);
+
+console.log("---");
+console.log("Refresh interval");
+for (const seconds of [15, 30, 60, 300]) {
+  console.log(`${selected(refreshSeconds, seconds)} ${refreshLabel(seconds)} | ${action("set-refresh-seconds", seconds)}`);
+}
+
+console.log("---");
+console.log("Reset time");
+for (const hour of [0, 4, 8, 12]) {
+  const label = `${String(hour).padStart(2, "0")}:00`;
+  console.log(`${selected(resetHour, hour)} ${label} | ${action("set-reset-hour", hour)}`);
+}
+
+console.log("---");
+console.log(`Refresh now | ${action("force-refresh", "1")}`);
+console.log("Made with <3 by crearo | href=https://github.com/crearo/ai-usage-bar");
+console.log(`Config: ${queryDate}`);
+NODE_RENDER
 node_exit=$?
 
-printf "%s\n" "$menu_output"
+cat "$cache_output_file"
 
 if (( node_exit == 0 )); then
-  printf "%s\n" "$menu_output" > "$cache_output_file"
   {
     echo "CACHE_KEY=$cache_key"
     echo "LAST_RUN=$now"
   } > "$cache_meta_file"
+else
+  rm -f "$cache_meta_file"
 fi
