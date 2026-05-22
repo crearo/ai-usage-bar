@@ -7,6 +7,7 @@
 # <xbar.dependencies>ccusage,node</xbar.dependencies>
 # <swiftbar.refreshOnOpen>true</swiftbar.refreshOnOpen>
 
+# Hidden implementation file: SwiftBar should expose only ai-usage.15s.sh as the menu item.
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
 script_path="${USAGE_COUNTER_WRAPPER_PATH:-${0:A}}"
