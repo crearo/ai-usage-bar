@@ -403,6 +403,7 @@ try {
 
   console.log("---");
   console.log(`Refresh now | ${action("force-refresh", "1")}`);
+  console.log("Made with <3 by crearo | href=https://github.com/crearo/ai-usage-bar");
   console.log(`Config: ${queryDate}`);
 } catch (error) {
   console.log("Usage ? | color=#d14343 sfimage=exclamationmark.triangle");
