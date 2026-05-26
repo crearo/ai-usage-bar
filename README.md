@@ -2,7 +2,11 @@
 
 SwiftBar plugin for Claude/Codex usage in the macOS menu bar (top right).
 
+[![Watch demo](https://img.youtube.com/vi/dT2NoWe50r4/maxresdefault.jpg)](https://youtube.com/shorts/dT2NoWe50r4?feature=share)
+
 ![AI Usage Bar in the macOS menu bar](docs/menu-bar.png)
+
+Usage data is collected via [ccusage](https://github.com/ryoppippi/ccusage).
 
 ## Setup
 
