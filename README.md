@@ -34,13 +34,7 @@ Settings live in `swiftbar/.usage-counter.conf` (most are also editable from the
 - `RANGE` — `today`, `week`, `last7`, `month`, or `last30`
 - `RESET_HOUR` — hour (0-23) the "today" range resets at
 - `REFRESH_SECONDS` — `15`, `30`, `60`, or `300`
-- `CLAUDE_CONFIG_DIR` — optional. Forwarded to `ccusage` as the `CLAUDE_CONFIG_DIR` env var so it can find Claude usage data in non-default locations. Leave blank to use ccusage's default lookup. If you run Claude Code under multiple accounts/profiles (e.g. via `claude --settings` or separate `.claude-*` home dirs), set this to a comma-separated list of paths to aggregate usage across all of them:
-
-  ```
-  CLAUDE_CONFIG_DIR=/Users/you/.claude-work,/Users/you/.claude-personal
-  ```
-
-  This only affects the `claude` data source — Codex usage is unaffected.
+- `CLAUDE_CONFIG_DIR` — if you have more than one Claude account (work and personal, say), each one usually has its own `~/.claude*` folder. The menu shows a "Claude profiles" checklist and adds up usage from all of them by default — untick any you don't want counted.
 
 ## After reboot
 

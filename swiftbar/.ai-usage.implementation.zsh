@@ -22,6 +22,7 @@ range="today"
 reset_hour="0"
 refresh_seconds="60"
 claude_config_dir=""
+claude_config_dir_set=0
 
 read_config() {
   [[ -f "$config_file" ]] || return
@@ -32,7 +33,7 @@ read_config() {
       RESET_HOUR) reset_hour="$value" ;;
       REFRESH_SECONDS) refresh_seconds="$value" ;;
       RANGE) range="$value" ;;
-      CLAUDE_CONFIG_DIR) claude_config_dir="$value" ;;
+      CLAUDE_CONFIG_DIR) claude_config_dir="$value"; claude_config_dir_set=1 ;;
     esac
   done < "$config_file"
 
@@ -70,7 +71,41 @@ clear_cache() {
   rm -f "$cache_output_file" "$cache_meta_file" "$stderr_dir/payload.json"
 }
 
+toggle_claude_config_dir() {
+  local target="$1"
+  [[ -z "$target" ]] && return
+  local -a dirs
+  if [[ -n "$claude_config_dir" ]]; then
+    dirs=("${(@s:,:)claude_config_dir}")
+  fi
+  if (( ${dirs[(Ie)$target]} )); then
+    dirs=("${(@)dirs:#$target}")
+  else
+    dirs+=("$target")
+  fi
+  claude_config_dir="${(j:,:)dirs}"
+  write_config
+  clear_cache
+}
+
 read_config
+
+detect_claude_config_dirs() {
+  local dir
+  for dir in "$HOME"/.claude*(N/); do
+    [[ -f "$dir/settings.json" || -d "$dir/projects" ]] && print -r -- "$dir"
+  done
+}
+
+claude_config_dir_candidates=()
+while IFS= read -r dir; do
+  [[ -n "$dir" ]] && claude_config_dir_candidates+=("$dir")
+done < <(detect_claude_config_dirs)
+
+# No explicit choice saved yet: default to using every detected profile.
+if (( ! claude_config_dir_set )) && (( ${#claude_config_dir_candidates} > 1 )); then
+  claude_config_dir="${(j:,:)claude_config_dir_candidates}"
+fi
 
 case "$1" in
   set-mode)
@@ -113,6 +148,10 @@ case "$1" in
     ;;
   force-refresh)
     clear_cache
+    exit 0
+    ;;
+  toggle-claude-config-dir)
+    toggle_claude_config_dir "$2"
     exit 0
     ;;
 esac
@@ -313,6 +352,9 @@ SINCE_DISPLAY_DATE="$since_display_date" \
 UNTIL_DISPLAY_DATE="$until_display_date" \
 TIMEZONE_NAME="$timezone_name" \
 SCRIPT_PATH="$script_path" \
+CLAUDE_CONFIG_DIR_VALUE="$claude_config_dir" \
+CLAUDE_CONFIG_DIR_CANDIDATES="${(F)claude_config_dir_candidates}" \
+HOME_DIR="$HOME" \
 /usr/bin/env node <<'NODE_PAYLOAD'
 const fs = require("fs");
 
@@ -329,6 +371,12 @@ const payload = {
   untilDisplayDate: process.env.UNTIL_DISPLAY_DATE || "",
   timezoneName: process.env.TIMEZONE_NAME || "",
   scriptPath: process.env.SCRIPT_PATH || "",
+  claudeConfigDir: process.env.CLAUDE_CONFIG_DIR_VALUE || "",
+  claudeConfigDirCandidates: (process.env.CLAUDE_CONFIG_DIR_CANDIDATES || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean),
+  homeDir: process.env.HOME_DIR || "",
   reports: [],
 };
 
@@ -364,6 +412,15 @@ const sinceDisplayDate = payload.sinceDisplayDate || displayDate;
 const untilDisplayDate = payload.untilDisplayDate || displayDate;
 const timezoneName = payload.timezoneName || "system timezone";
 const scriptPath = payload.scriptPath || "";
+const homeDir = payload.homeDir || "";
+const claudeConfigDirCandidates = payload.claudeConfigDirCandidates || [];
+const selectedConfigDirs = new Set(
+  (payload.claudeConfigDir || "").split(",").map((dir) => dir.trim()).filter(Boolean)
+);
+
+function shortDir(dir) {
+  return homeDir && dir.startsWith(homeDir) ? `~${dir.slice(homeDir.length)}` : dir;
+}
 
 function numberValue(...values) {
   for (const value of values) {
@@ -590,6 +647,18 @@ console.log("Mode");
 console.log(`${selected(mode, "codex")} Codex only | ${action("set-mode", "codex")}`);
 console.log(`${selected(mode, "claude")} Claude only | ${action("set-mode", "claude")}`);
 console.log(`${selected(mode, "both")} Claude + Codex | ${action("set-mode", "both")}`);
+
+if (claudeConfigDirCandidates.length > 1) {
+  console.log("---");
+  console.log("Claude profiles");
+  for (const dir of claudeConfigDirCandidates) {
+    const mark = selectedConfigDirs.has(dir) ? "[x]" : "[ ]";
+    console.log(`${mark} ${shortDir(dir)} | ${action("toggle-claude-config-dir", dir)}`);
+  }
+  if (selectedConfigDirs.size === 0) {
+    console.log("Using ccusage default (none checked above)");
+  }
+}
 
 console.log("---");
 console.log("Refresh interval");
