@@ -296,7 +296,7 @@ collect_report_files() {
   local source="$1"
   local stdout_file="$run_dir/$source.out"
   local stderr_file="$run_dir/$source.err"
-  local command_text="${ccusage_cmd[*]} $source daily --json --since $since_date --until $until_date --offline ${timezone_args[*]}"
+  local command_text="${ccusage_cmd[*]} $source daily --json --since $since_date --until $until_date ${timezone_args[*]}"
 
   if [[ "$ccusage_available" != "true" ]]; then
     printf "%s\n" "Missing dependency: install ccusage, Node.js/npm, or Bun." >"$stderr_file"
@@ -304,7 +304,7 @@ collect_report_files() {
     return
   fi
 
-  "${ccusage_cmd[@]}" "$source" daily --json --since "$since_date" --until "$until_date" --offline "${timezone_args[@]}" >"$stdout_file" 2>"$stderr_file"
+  "${ccusage_cmd[@]}" "$source" daily --json --since "$since_date" --until "$until_date" "${timezone_args[@]}" >"$stdout_file" 2>"$stderr_file"
   local exit_code=$?
 
   local stderr_text=""
