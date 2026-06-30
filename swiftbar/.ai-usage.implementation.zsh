@@ -21,6 +21,7 @@ mode="both"
 range="today"
 reset_hour="0"
 refresh_seconds="60"
+claude_config_dir=""
 
 read_config() {
   [[ -f "$config_file" ]] || return
@@ -31,6 +32,7 @@ read_config() {
       RESET_HOUR) reset_hour="$value" ;;
       REFRESH_SECONDS) refresh_seconds="$value" ;;
       RANGE) range="$value" ;;
+      CLAUDE_CONFIG_DIR) claude_config_dir="$value" ;;
     esac
   done < "$config_file"
 
@@ -60,6 +62,7 @@ write_config() {
     echo "RANGE=$range"
     echo "RESET_HOUR=$reset_hour"
     echo "REFRESH_SECONDS=$refresh_seconds"
+    echo "CLAUDE_CONFIG_DIR=$claude_config_dir"
   } > "$config_file"
 }
 
@@ -124,6 +127,10 @@ trap cleanup_run_dir EXIT HUP INT TERM
 payload_file="$run_dir/payload.json"
 render_output_file="$run_dir/menu.out"
 cache_meta_temp="$run_dir/menu.meta"
+
+if [[ -n "$claude_config_dir" ]]; then
+  export CLAUDE_CONFIG_DIR="$claude_config_dir"
+fi
 
 ccusage_available="true"
 if command -v ccusage >/dev/null 2>&1; then
@@ -225,7 +232,7 @@ case "$range" in
     ;;
 esac
 
-cache_key="$mode|$range|$reset_hour|$refresh_seconds|$since_date|$until_date|$timezone_name"
+cache_key="$mode|$range|$reset_hour|$refresh_seconds|$since_date|$until_date|$timezone_name|$claude_config_dir"
 cache_key_saved=""
 cache_last_run="0"
 now="$(date +%s)"
