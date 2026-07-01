@@ -12,6 +12,7 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PAT
 
 script_path="${USAGE_COUNTER_WRAPPER_PATH:-${0:A}}"
 plugin_dir="${0:A:h}"
+repo_root="${plugin_dir:h}"
 config_file="$plugin_dir/.usage-counter.conf"
 stderr_dir="${TMPDIR:-/tmp}/swiftbar-agent-usage"
 cache_output_file="$stderr_dir/menu.out"
@@ -88,6 +89,24 @@ toggle_claude_config_dir() {
   clear_cache
 }
 
+git_run_with_timeout() {
+  local timeout_seconds="$1"; shift
+  local ticks=$(( timeout_seconds * 2 ))
+  ( GIT_TERMINAL_PROMPT=0 "$@" ) &
+  local pid=$!
+  local waited=0
+  while kill -0 "$pid" 2>/dev/null && (( waited < ticks )); do
+    sleep 0.5
+    waited=$((waited + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    return 124
+  fi
+  wait "$pid"
+}
+
 read_config
 
 detect_claude_config_dirs() {
@@ -150,6 +169,14 @@ case "$1" in
     clear_cache
     exit 0
     ;;
+  git-pull)
+    if [[ -d "$repo_root/.git" ]]; then
+      git_run_with_timeout 20 git -C "$repo_root" pull --ff-only --quiet origin main
+    fi
+    clear_cache
+    rm -f "$stderr_dir/update.meta"
+    exit 0
+    ;;
   toggle-claude-config-dir)
     toggle_claude_config_dir "$2"
     exit 0
@@ -162,6 +189,45 @@ cleanup_run_dir() {
   [[ -n "$run_dir" && -d "$run_dir" ]] && rm -rf "$run_dir"
 }
 trap cleanup_run_dir EXIT HUP INT TERM
+
+update_meta_file="$stderr_dir/update.meta"
+update_available="false"
+update_behind_count="0"
+
+if [[ -d "$repo_root/.git" ]]; then
+  update_last_check="0"
+  update_behind_saved="0"
+  if [[ -f "$update_meta_file" ]]; then
+    while IFS='=' read -r key value; do
+      case "$key" in
+        LAST_CHECK) update_last_check="$value" ;;
+        BEHIND_COUNT) update_behind_saved="$value" ;;
+      esac
+    done < "$update_meta_file"
+  fi
+  [[ "$update_last_check" == <-> ]] || update_last_check="0"
+  [[ "$update_behind_saved" == <-> ]] || update_behind_saved="0"
+
+  update_now="$(date +%s)"
+  if (( update_now - update_last_check >= 86400 )); then
+    git_run_with_timeout 8 git -C "$repo_root" fetch --quiet --no-tags origin main
+    if (( $? == 0 )); then
+      update_behind_count="$(git -C "$repo_root" rev-list --count HEAD..origin/main 2>/dev/null)"
+      [[ "$update_behind_count" == <-> ]] || update_behind_count="$update_behind_saved"
+    else
+      update_behind_count="$update_behind_saved"
+    fi
+    {
+      echo "LAST_CHECK=$update_now"
+      echo "BEHIND_COUNT=$update_behind_count"
+    } > "$run_dir/update.meta"
+    mv -f "$run_dir/update.meta" "$update_meta_file"
+  else
+    update_behind_count="$update_behind_saved"
+  fi
+
+  [[ "$update_behind_count" == <-> ]] && (( update_behind_count > 0 )) && update_available="true"
+fi
 
 payload_file="$run_dir/payload.json"
 render_output_file="$run_dir/menu.out"
@@ -355,6 +421,8 @@ SCRIPT_PATH="$script_path" \
 CLAUDE_CONFIG_DIR_VALUE="$claude_config_dir" \
 CLAUDE_CONFIG_DIR_CANDIDATES="${(F)claude_config_dir_candidates}" \
 HOME_DIR="$HOME" \
+UPDATE_AVAILABLE="$update_available" \
+UPDATE_BEHIND_COUNT="$update_behind_count" \
 /usr/bin/env node <<'NODE_PAYLOAD'
 const fs = require("fs");
 
@@ -377,6 +445,8 @@ const payload = {
     .map((line) => line.trim())
     .filter(Boolean),
   homeDir: process.env.HOME_DIR || "",
+  updateAvailable: process.env.UPDATE_AVAILABLE === "true",
+  updateBehindCount: Number.parseInt(process.env.UPDATE_BEHIND_COUNT || "0", 10),
   reports: [],
 };
 
@@ -417,6 +487,9 @@ const claudeConfigDirCandidates = payload.claudeConfigDirCandidates || [];
 const selectedConfigDirs = new Set(
   (payload.claudeConfigDir || "").split(",").map((dir) => dir.trim()).filter(Boolean)
 );
+
+const updateAvailable = Boolean(payload.updateAvailable);
+const updateBehindCount = Number.isFinite(payload.updateBehindCount) ? payload.updateBehindCount : 0;
 
 function shortDir(dir) {
   return homeDir && dir.startsWith(homeDir) ? `~${dir.slice(homeDir.length)}` : dir;
@@ -587,7 +660,7 @@ const models = [...total.models].length > 0 ? [...total.models].join(", ") : "No
 const resetLabel = `${String(resetHour).padStart(2, "0")}:00`;
 const hasErrors = reports.some((report) => report.status === "error");
 
-console.log(`${modeLabel()} ${money(total.cost)} ${compactNumber(total.total)}${hasErrors ? " !" : ""}`);
+console.log(`${modeLabel()} ${money(total.cost)} ${compactNumber(total.total)}${hasErrors ? " !" : ""}${updateAvailable ? " •" : ""}`);
 console.log("---");
 console.log(`Mode: ${modeLabel()}`);
 console.log(`Range: ${rangeLabel}`);
@@ -676,6 +749,9 @@ if (range === "today") {
 }
 
 console.log("---");
+if (updateAvailable) {
+  console.log(`Update available (${updateBehindCount} commit${updateBehindCount === 1 ? "" : "s"} behind) | ${action("git-pull", "1")}`);
+}
 console.log(`Refresh now | ${action("force-refresh", "1")}`);
 console.log("Made with <3 by crearo | href=https://github.com/crearo/ai-usage-bar");
 console.log(`Config: ${range} ${sinceDate}-${untilDate}`);
