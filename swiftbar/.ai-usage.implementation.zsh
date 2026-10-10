@@ -89,22 +89,11 @@ toggle_claude_config_dir() {
   clear_cache
 }
 
-git_run_with_timeout() {
-  local timeout_seconds="$1"; shift
-  local ticks=$(( timeout_seconds * 2 ))
-  ( GIT_TERMINAL_PROMPT=0 "$@" ) &
-  local pid=$!
-  local waited=0
-  while kill -0 "$pid" 2>/dev/null && (( waited < ticks )); do
-    sleep 0.5
-    waited=$((waited + 1))
-  done
-  if kill -0 "$pid" 2>/dev/null; then
-    kill "$pid" 2>/dev/null
-    wait "$pid" 2>/dev/null
-    return 124
-  fi
-  wait "$pid"
+run_git_update_bg() {
+  local op="$1" notify_result="$2"
+  [[ -d "$repo_root/.git" ]] || return
+  mkdir -p "$stderr_dir"
+  nohup zsh "$plugin_dir/.ai-usage-git-update.zsh" "$op" "$repo_root" "$stderr_dir" "$notify_result" >/dev/null 2>&1 </dev/null &
 }
 
 read_config
@@ -170,11 +159,13 @@ case "$1" in
     exit 0
     ;;
   git-pull)
-    if [[ -d "$repo_root/.git" ]]; then
-      git_run_with_timeout 20 git -C "$repo_root" pull --ff-only --quiet origin main
-    fi
+    run_git_update_bg pull true
     clear_cache
-    rm -f "$stderr_dir/update.meta"
+    exit 0
+    ;;
+  check-updates)
+    run_git_update_bg check true
+    clear_cache
     exit 0
     ;;
   toggle-claude-config-dir)
@@ -190,43 +181,40 @@ cleanup_run_dir() {
 }
 trap cleanup_run_dir EXIT HUP INT TERM
 
+# Never do the actual git fetch here: this code runs on the same path that
+# draws the menu bar text, so any network call here would stall the whole
+# menu bar. Instead, just read whatever a background check last found, and
+# if it's due for a refresh, kick that off detached and move on immediately.
 update_meta_file="$stderr_dir/update.meta"
 update_available="false"
 update_behind_count="0"
 
 if [[ -d "$repo_root/.git" ]]; then
   update_last_check="0"
-  update_behind_saved="0"
   if [[ -f "$update_meta_file" ]]; then
     while IFS='=' read -r key value; do
       case "$key" in
         LAST_CHECK) update_last_check="$value" ;;
-        BEHIND_COUNT) update_behind_saved="$value" ;;
+        BEHIND_COUNT) update_behind_count="$value" ;;
       esac
     done < "$update_meta_file"
   fi
   [[ "$update_last_check" == <-> ]] || update_last_check="0"
-  [[ "$update_behind_saved" == <-> ]] || update_behind_saved="0"
+  [[ "$update_behind_count" == <-> ]] || update_behind_count="0"
 
   update_now="$(date +%s)"
   if (( update_now - update_last_check >= 86400 )); then
-    git_run_with_timeout 8 git -C "$repo_root" fetch --quiet --no-tags origin main
-    if (( $? == 0 )); then
-      update_behind_count="$(git -C "$repo_root" rev-list --count HEAD..origin/main 2>/dev/null)"
-      [[ "$update_behind_count" == <-> ]] || update_behind_count="$update_behind_saved"
-    else
-      update_behind_count="$update_behind_saved"
-    fi
+    # Bump the timestamp now (before the background job finishes) so rapid
+    # back-to-back polls don't each spawn their own redundant fetch.
     {
       echo "LAST_CHECK=$update_now"
       echo "BEHIND_COUNT=$update_behind_count"
     } > "$run_dir/update.meta"
     mv -f "$run_dir/update.meta" "$update_meta_file"
-  else
-    update_behind_count="$update_behind_saved"
+    run_git_update_bg check false
   fi
 
-  [[ "$update_behind_count" == <-> ]] && (( update_behind_count > 0 )) && update_available="true"
+  (( update_behind_count > 0 )) && update_available="true"
 fi
 
 payload_file="$run_dir/payload.json"
@@ -752,6 +740,7 @@ console.log("---");
 if (updateAvailable) {
   console.log(`Update available (${updateBehindCount} commit${updateBehindCount === 1 ? "" : "s"} behind) | ${action("git-pull", "1")}`);
 }
+console.log(`Check for updates | ${action("check-updates", "1")}`);
 console.log(`Refresh now | ${action("force-refresh", "1")}`);
 console.log("Made with <3 by crearo | href=https://github.com/crearo/ai-usage-bar");
 console.log(`Config: ${range} ${sinceDate}-${untilDate}`);
